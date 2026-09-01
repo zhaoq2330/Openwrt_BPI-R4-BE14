@@ -1,0 +1,34 @@
+name: Restore complete source history
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.bootstrap/**'
+      - '.github/workflows/restore-source.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify and restore Git bundle
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EXPECTED_SHA256: 706ed738e2b8c609e1ee396f98443c4185f21b11290374985c3215c19af461e9
+        run: |
+          set -euo pipefail
+          cat .bootstrap/source.bundle.part-* > /tmp/source.bundle
+          printf '%s  %s\n' "$EXPECTED_SHA256" /tmp/source.bundle | sha256sum -c -
+          git bundle verify /tmp/source.bundle
+          git clone /tmp/source.bundle /tmp/source
+          cd /tmp/source
+          git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          git push --force origin refs/heads/main:refs/heads/main
+          git push --force origin refs/tags/v25.12-be14-20260901:refs/tags/v25.12-be14-20260901

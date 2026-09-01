@@ -1,0 +1,13 @@
+{
+	"admin/network/wan-speedtest": {
+		"title": "外网测速",
+		"order": 95,
+		"action": {
+			"type": "view",
+			"path": "wan-speedtest/status"
+		},
+		"depends": {
+			"acl": [ "luci-app-wan-speedtest" ]
+		}
+	}
+}

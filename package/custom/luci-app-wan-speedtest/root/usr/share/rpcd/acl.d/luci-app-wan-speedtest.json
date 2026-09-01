@@ -1,0 +1,15 @@
+{
+	"luci-app-wan-speedtest": {
+		"description": "Grant access to the LibreSpeed WAN test helper",
+		"read": {
+			"ubus": {
+				"network.interface": [ "dump" ]
+			}
+		},
+		"write": {
+			"file": {
+				"/usr/libexec/wan-speedtest": [ "exec" ]
+			}
+		}
+	}
+}

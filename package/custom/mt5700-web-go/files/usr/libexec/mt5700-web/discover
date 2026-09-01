@@ -1,0 +1,30 @@
+#!/bin/sh
+
+fail() {
+	echo "invalid MT5700 discovery arguments" >&2
+	exit 2
+}
+
+[ "$#" -eq 2 ] || fail
+section="$1"
+port="$2"
+
+[ -n "$section" ] && [ "${#section}" -le 64 ] || fail
+case "$section" in
+	[A-Za-z0-9_]*) ;;
+	*) fail ;;
+esac
+case "$section" in
+	*[!A-Za-z0-9_-]*) fail ;;
+esac
+
+case "$port" in
+	auto) ;;
+	''|*[!A-Za-z0-9_./-]*) fail ;;
+	*)
+		printf '%s\n' "$port" |
+			grep -Eq '^/dev/(ttyUSB|ttyACM)[0-9]+$|^/dev/mhi_DUN[0-9]*$|^/dev/wwan[0-9]+at[0-9]+$' || fail
+		;;
+esac
+
+exec /usr/bin/mt5700-web-go -discover -modem-section "$section" -serial "$port"

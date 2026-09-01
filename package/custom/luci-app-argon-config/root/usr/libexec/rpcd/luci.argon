@@ -1,0 +1,111 @@
+#!/bin/sh
+
+. /lib/functions.sh
+. /usr/share/libubox/jshn.sh
+
+umask 077
+
+readonly bg_path="/www/luci-static/argon/background"
+readonly runtime_dir="/var/run/luci-argon-config"
+readonly tmp_path="$runtime_dir/background.upload"
+
+prepare_runtime_dir() {
+	[ ! -L "$runtime_dir" ] || return 1
+	if [ -e "$runtime_dir" ]; then
+		[ -d "$runtime_dir" ] || return 1
+	else
+		mkdir -p "$runtime_dir" || return 1
+	fi
+	chown root:root "$runtime_dir" || return 1
+	chmod 0700 "$runtime_dir" || return 1
+}
+
+valid_filename() {
+	[ -n "$1" ] && [ "${#1}" -le 128 ] || return 1
+	case "$1" in
+		.*|*..*|*[!A-Za-z0-9._-]*) return 1 ;;
+	esac
+	case "$1" in
+		*.gif|*.GIF|*.jpg|*.JPG|*.jpeg|*.JPEG|*.mp4|*.MP4|\
+		*.png|*.PNG|*.webm|*.WEBM|*.webp|*.WEBP) return 0 ;;
+		*) return 1 ;;
+	esac
+}
+
+prepare_runtime_dir || {
+	echo '{ "result": 1 }'
+	exit 1
+}
+
+case "$1" in
+"list")
+	json_init
+	json_add_object "avail"
+	json_close_object
+	json_add_object "remove"
+		json_add_string "filename" "filename"
+	json_close_object
+	json_add_object "rename"
+		json_add_string "newname" "filename"
+	json_close_object
+	json_dump
+	json_cleanup
+	;;
+"call")
+	case "$2" in
+		"avail")
+			json_init
+			json_add_int "avail" "$(df -Pk "$bg_path" | awk 'NR == 2 { print $4 }')"
+		json_dump
+		json_cleanup
+		;;
+	"remove")
+		read -r input
+		json_load "$input"
+		json_get_var filename "filename"
+		json_cleanup
+
+			if ! valid_filename "$filename"; then
+				echo '{ "result": 255 }'
+				exit 255
+		fi
+
+		rm -f "$bg_path/$filename"
+		echo '{ "result": 0 }'
+		;;
+	"rename")
+		read -r input
+		json_load "$input"
+		json_get_var newname "newname"
+		json_cleanup
+
+			if ! valid_filename "$newname"; then
+				echo '{ "result": 255 }'
+				exit 255
+			fi
+
+			destination="$bg_path/$newname"
+			if [ ! -f "$tmp_path" ] || [ -L "$tmp_path" ] ||
+			   [ -e "$destination" ] || [ -L "$destination" ]; then
+				rm -f "$tmp_path"
+				echo '{ "result": 1 }'
+				exit 1
+			fi
+
+			chmod 0600 "$tmp_path" || {
+				rm -f "$tmp_path"
+				echo '{ "result": 1 }'
+				exit 1
+			}
+
+			if mv "$tmp_path" "$destination" 2>"/dev/null" &&
+			   chmod 0644 "$destination"; then
+				echo '{ "result": 0 }'
+			else
+				rm -f "$tmp_path" "$destination"
+				echo '{ "result": 1 }'
+		fi
+		;;
+	esac
+	;;
+esac

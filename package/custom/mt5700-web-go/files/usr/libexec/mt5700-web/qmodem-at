@@ -1,0 +1,29 @@
+#!/bin/sh
+
+# Keep AT text, including possible SIM credentials, out of argv. The Go
+# service writes exactly one command line to stdin. modem_util provides the
+# same locks used by QModem, SIM switching, SMS and LED status reads.
+port="$1"
+timeout_seconds="$2"
+
+case "$port" in
+	/dev/*) ;;
+	*) echo "invalid AT port" >&2; exit 2 ;;
+esac
+case "$timeout_seconds" in
+	''|*[!0-9]*) echo "invalid AT timeout" >&2; exit 2 ;;
+esac
+IFS= read -r command || command=
+[ -n "$command" ] || {
+	echo "empty AT command" >&2
+	exit 2
+}
+if IFS= read -r extra_line; then
+	echo "multi-line AT command rejected" >&2
+	exit 2
+fi
+
+. /usr/share/qmodem/modem_util.sh
+use_ubus_flag=-u
+options="-t $timeout_seconds"
+at "$port" "$command"

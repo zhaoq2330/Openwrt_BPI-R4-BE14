@@ -1,0 +1,40 @@
+--- a/sms_main.c
++++ b/sms_main.c
+@@ -29,6 +29,7 @@ static void usage()
+ 		"options:\n"
+ 		"\t-b <baudrate> (default: 115200)\n"
+ 		"\t-c coding scheme (for ussd, 0 - 7BIT, 2 - UCS2, default: detect)\n"
++		"\t-t <seconds> response timeout (1 - 300, default: 5)\n"
+ 		"\t-d <tty device> (default: /dev/ttyUSB0)\n"
+ 		"\t-D debug (for ussd and at)\n"
+ 		"\t-f <date/time format> (for sms/recv)\n"
+@@ -168,13 +169,19 @@ int main(int argc, char* argv[])
+ 	int rawoutput = 0;
+ 	int jsonoutput = 0;
+ 	int debug = 0;
++	int user_set_timeout = 5;
+ 	int dcs = -1;
+ 	char stdin_at_cmd[1024] = {0};
+ 
+-	while ((ch = getopt(argc, argv, "b:c:d:Ds:f:jRr")) != -1){
++	while ((ch = getopt(argc, argv, "b:c:t:d:Ds:f:jRr")) != -1){
+ 		switch (ch) {
+ 		case 'b': baudrate = atoi(optarg); break;
+ 		case 'c': dcs = atoi(optarg); break;
++		case 't':
++			user_set_timeout = atoi(optarg);
++			if (user_set_timeout < 1 || user_set_timeout > 300)
++				usage();
++			break;
+ 		case 'd': dev = optarg; break;
+ 		case 'D': debug = 1; break;
+ 		case 's': storage = optarg; break;
+@@ -730,7 +737,7 @@ int main(int argc, char* argv[])
+ 
+ 	if (!strcmp("at", argv[0]))
+ 	{
+-		alarm(5);
++		alarm(user_set_timeout);
+ 		fputs(argv[1], pf);
+ 		fputs("\r\n", pf);
+ 

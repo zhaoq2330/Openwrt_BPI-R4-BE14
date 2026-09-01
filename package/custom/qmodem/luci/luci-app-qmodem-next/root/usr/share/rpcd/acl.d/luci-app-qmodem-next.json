@@ -1,0 +1,107 @@
+{
+	"luci-app-qmodem-next": {
+		"description": "Grant access to QModem Next application",
+		"read": {
+			"ubus": {
+				"qmodem": [
+					"base_info",
+					"cell_info",
+					"dial_status",
+					"get_5g_lan",
+					"get_at_cfg",
+					"get_available_devices",
+					"get_connect_status",
+					"get_copyright",
+					"get_current_band",
+					"get_current_band_capabilities",
+					"get_dial_log",
+					"get_disabled_features",
+					"get_dns",
+					"get_imei",
+					"get_leds",
+					"get_lockband",
+					"get_mode",
+					"get_neighborcell",
+					"get_network_interfaces",
+					"get_network_prefer",
+					"get_pcie_devices",
+					"get_reboot_caps",
+					"get_sim_slot",
+					"get_sim_switch_capabilities",
+					"get_sms",
+					"get_stats",
+					"get_traffic_reset_schedule",
+					"get_tty_ports",
+					"get_usb_devices",
+					"info",
+					"network_info",
+					"sim_info"
+				],
+				"qmodem_sms": [
+					"get_conversation",
+					"get_received_history",
+					"get_sent_history",
+					"get_sim_sms",
+					"get_sms_storage",
+					"list_sms"
+				],
+				"rc": [ "list" ],
+				"uci": [ "qmodem", "sms_forwarder" ]
+			},
+			"uci": [ "qmodem", "sms_forwarder" ]
+		},
+		"write": {
+			"ubus": {
+				"luci": [
+					"setInitAction"
+				],
+				"qmodem": [
+					"clear_dial_log",
+					"clear_stats",
+					"delete_sms",
+					"do_reboot",
+					"modem_dial",
+					"modem_hang",
+					"modem_redial",
+					"scan_all",
+					"scan_pcie",
+					"scan_usb",
+					"save_stats",
+					"send_at",
+					"send_raw_pdu",
+					"send_sms",
+					"set_imei",
+					"set_5g_lan",
+					"set_lockband",
+					"set_mode",
+					"set_neighborcell",
+					"set_network_prefer",
+					"set_sim_slot",
+					"set_sms_storage",
+					"set_traffic_reset_schedule",
+					"remove_modem"
+				],
+				"qmodem_sms": [
+					"send_sms",
+					"delete_sms",
+					"delete_sim_sms",
+					"mark_read",
+					"mark_forwarded",
+					"clear_sent_history",
+					"clear_received_history",
+					"set_sms_storage"
+				],
+				"uci": [ "qmodem", "sms_forwarder" ]
+			},
+			"uci": [ "qmodem", "sms_forwarder" ]
+		}
+	},
+	"luci-mod-status-index": {
+		"description": "Grant access to main status display",
+		"read": {
+			"ubus": {
+				"qmodem": [ "cell_info","base_info" ]
+			}
+		}
+	}
+}

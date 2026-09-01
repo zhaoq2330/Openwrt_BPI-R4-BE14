@@ -1,0 +1,91 @@
+/* SPDX-License-Identifier: (GPL-2.0-only OR MIT) */
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "mediatek,mt7981-rfb", "mediatek,mt7981";
+
+	fragment@0 {
+		target = <&chosen>;
+		rootdisk-spim-nand = <&ubi_root>;
+		bootargs-append = " ubi.block=0,firmware root=/dev/fit0 rootwait";
+	};
+
+	fragment@1 {
+		target = <&spi0>;
+		__overlay__ {
+			status = "okay";
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			flash@0 {
+				compatible = "spi-nand";
+				reg = <0>;
+				spi-max-frequency = <52000000>;
+				spi-tx-bus-width = <4>;
+				spi-rx-bus-width = <4>;
+
+				partitions {
+					compatible = "fixed-partitions";
+					#address-cells = <1>;
+					#size-cells = <1>;
+
+					partition@0 {
+						label = "BL2";
+						reg = <0x00000 0x0200000>;
+						read-only;
+					};
+
+					partition@200000 {
+						label = "ubi";
+						reg = <0x0200000 0x7e00000>;
+						compatible = "linux,ubi";
+
+						volumes {
+							ubi-volume-ubootenv {
+								volname = "ubootenv";
+								nvmem-layout {
+									compatible = "u-boot,env-redundant-bool";
+								};
+							};
+
+							ubi-volume-ubootenv2 {
+								volname = "ubootenv2";
+								nvmem-layout {
+									compatible = "u-boot,env-redundant-bool";
+								};
+							};
+
+							ubi_factory: ubi-volume-factory {
+								volname = "factory";
+
+								nvmem-layout {
+									compatible = "fixed-layout";
+									#address-cells = <1>;
+									#size-cells = <1>;
+
+									eeprom_wmac: eeprom@0 {
+										reg = <0x0 0x1000>;
+									};
+								};
+							};
+
+							ubi_root: ubi-volume-fit {
+								volname = "fit";
+							};
+						};
+					};
+				};
+			};
+		};
+	};
+
+	fragment@2 {
+		target = <&wifi>;
+		__overlay__ {
+			nvmem-cell-names = "eeprom";
+			nvmem-cells = <&eeprom_wmac>;
+			status = "okay";
+		};
+	};
+};

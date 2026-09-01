@@ -1,0 +1,506 @@
+#!/bin/sh
+
+umask 077
+
+RUNTIME_DIR=/var/run/wan-speedtest
+PID_FILE="$RUNTIME_DIR/pid"
+STATE_FILE="$RUNTIME_DIR/state"
+RESULT_FILE="$RUNTIME_DIR/result.json"
+ERROR_FILE="$RUNTIME_DIR/error.log"
+LOCK_DIR="$RUNTIME_DIR/lock"
+LOCK_OWNER_FILE="$LOCK_DIR/owner"
+MUTEX_FILE="$RUNTIME_DIR/mutex"
+PROC_ROOT=/proc
+SELF=/usr/libexec/wan-speedtest
+
+json_reply() {
+	printf '{"ok":%s,"state":"%s"}\n' "$1" "$2"
+}
+
+safe_runtime_dir() {
+	[ ! -L "$RUNTIME_DIR" ] &&
+		[ -d "$RUNTIME_DIR" ] &&
+		[ "$(stat -c '%u:%g:%a' "$RUNTIME_DIR" 2>/dev/null)" = 0:0:700 ]
+}
+
+safe_regular_file() {
+	file="$1"
+	[ ! -L "$file" ] || return 1
+	[ -e "$file" ] || return 0
+	[ -f "$file" ] &&
+		[ "$(stat -c '%u:%g:%a:%h' "$file" 2>/dev/null)" = 0:0:600:1 ]
+}
+
+safe_lock_dir() {
+	[ ! -L "$LOCK_DIR" ] || return 1
+	[ -d "$LOCK_DIR" ] &&
+		[ "$(stat -c '%u:%g:%a' "$LOCK_DIR" 2>/dev/null)" = 0:0:700 ]
+}
+
+path_exists() {
+	[ -e "$1" ] || [ -L "$1" ]
+}
+
+create_mutex_file() {
+	if ! path_exists "$MUTEX_FILE"; then
+		(umask 077; set -C; : > "$MUTEX_FILE") 2>/dev/null || true
+	fi
+	safe_regular_file "$MUTEX_FILE" || return 1
+	[ -e "$MUTEX_FILE" ]
+}
+
+init_runtime() {
+	[ ! -L "$RUNTIME_DIR" ] || return 1
+	if [ ! -e "$RUNTIME_DIR" ]; then
+		mkdir -m 0700 "$RUNTIME_DIR" 2>/dev/null || safe_runtime_dir || return 1
+	fi
+	safe_runtime_dir || return 1
+	for file in "$PID_FILE" "$STATE_FILE" "$RESULT_FILE" "$ERROR_FILE"; do
+		safe_regular_file "$file" || return 1
+	done
+	create_mutex_file || return 1
+	if path_exists "$LOCK_DIR"; then
+		safe_lock_dir || return 1
+		safe_regular_file "$LOCK_OWNER_FILE" || return 1
+	fi
+}
+
+safe_remove_file() {
+	file="$1"
+	safe_regular_file "$file" || return 1
+	[ -e "$file" ] || return 0
+	rm -f "$file"
+}
+
+lock_mutex() {
+	mode="$1"
+	exec 9<>"$MUTEX_FILE" || return 1
+	if [ "$mode" = try ]; then
+		flock -n 9 || {
+			exec 9>&-
+			return 1
+		}
+	else
+		flock 9 || {
+			exec 9>&-
+			return 1
+		}
+	fi
+}
+
+unlock_mutex() {
+	flock -u 9 2>/dev/null || true
+	exec 9>&-
+}
+
+valid_token() {
+	[ -n "$1" ] && [ "${#1}" -le 128 ] || return 1
+	case "$1" in
+		*[!A-Za-z0-9_.:-]*) return 1 ;;
+	esac
+}
+
+process_starttime() {
+	proc_pid="$1"
+	case "$proc_pid" in
+		''|0|*[!0-9]*) return 1 ;;
+	esac
+	kill -0 "$proc_pid" 2>/dev/null || return 1
+	if [ "$proc_pid" = "$$" ]; then
+		proc_stat_path="$PROC_ROOT/self/stat"
+	else
+		proc_stat_path="$PROC_ROOT/$proc_pid/stat"
+	fi
+	if [ ! -r "$proc_stat_path" ] && [ "$PROC_ROOT" != /proc ]; then
+		proc_stat_path="$PROC_ROOT/self/stat"
+	fi
+	proc_stat="$(cat "$proc_stat_path" 2>/dev/null)" || return 1
+	proc_tail=${proc_stat##*) }
+	set -- $proc_tail
+	[ "$#" -ge 20 ] || return 1
+	shift 19
+	case "$1" in
+		''|*[!0-9]*) return 1 ;;
+	esac
+	printf '%s\n' "$1"
+}
+
+read_lock_owner() {
+	safe_regular_file "$LOCK_OWNER_FILE" || return 1
+	[ -s "$LOCK_OWNER_FILE" ] || return 1
+	OWNER_ROLE=
+	OWNER_PID=
+	OWNER_START=
+	OWNER_TOKEN=
+	OWNER_EXTRA=
+	IFS=' ' read -r OWNER_ROLE OWNER_PID OWNER_START OWNER_TOKEN OWNER_EXTRA \
+		< "$LOCK_OWNER_FILE" || return 1
+	case "$OWNER_ROLE" in
+		pending|worker) ;;
+		*) return 1 ;;
+	esac
+	case "$OWNER_PID:$OWNER_START" in
+		*[!0-9:]*) return 1 ;;
+	esac
+	[ "$OWNER_PID" -gt 0 ] && [ "$OWNER_START" -gt 0 ] || return 1
+	valid_token "$OWNER_TOKEN" || return 1
+	[ -z "$OWNER_EXTRA" ]
+}
+
+owner_is_active() {
+	read_lock_owner || return 1
+	actual_start="$(process_starttime "$OWNER_PID")" || return 1
+	[ "$actual_start" = "$OWNER_START" ]
+}
+
+write_lock_owner() {
+	owner_role="$1"
+	owner_pid="$2"
+	owner_start="$3"
+	owner_token="$4"
+	case "$owner_role" in
+		pending|worker) ;;
+		*) return 1 ;;
+	esac
+	case "$owner_pid:$owner_start" in
+		*[!0-9:]*) return 1 ;;
+	esac
+	[ "$owner_pid" -gt 0 ] && [ "$owner_start" -gt 0 ] || return 1
+	valid_token "$owner_token" || return 1
+	safe_lock_dir || return 1
+	safe_regular_file "$LOCK_OWNER_FILE" || return 1
+	owner_tmp="$(mktemp "$LOCK_DIR/.owner.XXXXXX")" || return 1
+	if ! printf '%s %s %s %s\n' \
+		"$owner_role" "$owner_pid" "$owner_start" "$owner_token" > "$owner_tmp" ||
+	   ! chmod 0600 "$owner_tmp" ||
+	   ! replace_managed_file "$owner_tmp" "$LOCK_OWNER_FILE"; then
+		rm -f "$owner_tmp"
+		return 1
+	fi
+}
+
+lock_owned_by() {
+	requested_token="$1"
+	read_lock_owner && [ "$OWNER_TOKEN" = "$requested_token" ]
+}
+
+remove_run_lock() {
+	requested_token="$1"
+	safe_lock_dir || return 1
+	if [ -n "$requested_token" ]; then
+		lock_owned_by "$requested_token" || return 1
+	elif [ -e "$LOCK_OWNER_FILE" ]; then
+		safe_regular_file "$LOCK_OWNER_FILE" || return 1
+	fi
+	rm -f "$LOCK_OWNER_FILE" || return 1
+	rmdir "$LOCK_DIR"
+}
+
+remove_stale_run_lock() {
+	path_exists "$LOCK_DIR" || return 0
+	safe_lock_dir || return 1
+	if owner_is_active; then
+		return 2
+	fi
+	remove_run_lock '' || return 1
+	safe_remove_file "$PID_FILE"
+}
+
+create_run_lock() {
+	pending_pid=$$
+	pending_start="$(process_starttime "$pending_pid")" || return 1
+	if [ -r /proc/sys/kernel/random/uuid ]; then
+		RUN_TOKEN="$(cat /proc/sys/kernel/random/uuid 2>/dev/null)"
+	else
+		RUN_TOKEN="${pending_pid}.${pending_start}.$(date +%s)"
+	fi
+	valid_token "$RUN_TOKEN" || return 1
+	[ ! -e "$LOCK_DIR" ] && [ ! -L "$LOCK_DIR" ] || return 1
+	mkdir -m 0700 "$LOCK_DIR" 2>/dev/null || return 1
+	safe_lock_dir || return 1
+	write_lock_owner pending "$pending_pid" "$pending_start" "$RUN_TOKEN" || {
+		rmdir "$LOCK_DIR" 2>/dev/null || true
+		return 1
+	}
+}
+
+replace_managed_file() {
+	source_file="$1"
+	destination_file="$2"
+	[ ! -L "$source_file" ] &&
+		[ -f "$source_file" ] &&
+		[ "$(stat -c '%u:%g:%a:%h' "$source_file" 2>/dev/null)" = 0:0:600:1 ] || return 1
+	safe_regular_file "$destination_file" || return 1
+	mv -f "$source_file" "$destination_file" || return 1
+	safe_regular_file "$destination_file"
+}
+
+write_state() {
+	new_state="$1"
+	state_tmp="$(mktemp "$RUNTIME_DIR/.state.XXXXXX")" || return 1
+	printf '%s\n' "$new_state" > "$state_tmp" || {
+		rm -f "$state_tmp"
+		return 1
+	}
+	chmod 0600 "$state_tmp" || {
+		rm -f "$state_tmp"
+		return 1
+	}
+	replace_managed_file "$state_tmp" "$STATE_FILE" || {
+		rm -f "$state_tmp"
+		return 1
+	}
+}
+
+runtime_error() {
+	json_reply false unsafe-runtime
+	exit 1
+}
+
+valid_interface() {
+	[ -z "$1" ] && return 0
+	case "$1" in
+		*[!A-Za-z0-9_.:-]*) return 1 ;;
+	esac
+	[ -d "/sys/class/net/$1" ]
+}
+
+is_running() {
+	path_exists "$LOCK_DIR" && safe_lock_dir && owner_is_active
+}
+
+status() {
+	state="$(cat "$STATE_FILE" 2>/dev/null)"
+	case "$state" in
+		idle|running|complete|failed|cancelled) ;;
+		'') state=idle ;;
+		*) state=failed; write_state "$state" || runtime_error ;;
+	esac
+	if [ "$state" = running ] && ! is_running; then
+		lock_mutex wait || runtime_error
+		if ! is_running; then
+			if remove_stale_run_lock; then
+				state=failed
+				write_state "$state" || {
+					unlock_mutex
+					runtime_error
+				}
+			else
+				stale_status=$?
+				if [ "$stale_status" -ne 2 ]; then
+					unlock_mutex
+					runtime_error
+				fi
+			fi
+		fi
+		unlock_mutex
+	fi
+
+	printf '{"ok":true,"state":"%s","result":' "$state"
+	if [ -s "$RESULT_FILE" ] && jsonfilter -i "$RESULT_FILE" -e '@' >/dev/null 2>&1; then
+		cat "$RESULT_FILE"
+	else
+		printf 'null'
+	fi
+	printf '}\n'
+}
+
+claim_worker() {
+	worker_token="$1"
+	valid_token "$worker_token" || return 1
+	worker_start="$(process_starttime "$$")" || return 1
+	lock_mutex wait || return 1
+	if ! read_lock_owner ||
+	   [ "$OWNER_TOKEN" != "$worker_token" ] ||
+	   [ "$OWNER_ROLE" != worker ] ||
+	   [ "$OWNER_PID" != "$$" ] ||
+	   [ "$OWNER_START" != "$worker_start" ]; then
+		unlock_mutex
+		return 1
+	fi
+	unlock_mutex
+}
+
+worker_cleanup() {
+	cleanup_token="$1"
+	cleanup_result="$2"
+	cleanup_error="$3"
+	rm -f "$cleanup_result" "$cleanup_error"
+	lock_mutex wait || return 0
+	if lock_owned_by "$cleanup_token"; then
+		safe_remove_file "$PID_FILE" 2>/dev/null || true
+		remove_run_lock "$cleanup_token" 2>/dev/null || true
+	fi
+	unlock_mutex
+}
+
+terminate_worker() {
+	if [ -n "${speedtest_pid:-}" ]; then
+		kill "$speedtest_pid" 2>/dev/null || true
+		wait "$speedtest_pid" 2>/dev/null || true
+		speedtest_pid=
+	fi
+	exit 1
+}
+
+commit_worker_result() {
+	commit_token="$1"
+	commit_ok="$2"
+	commit_result="$3"
+	commit_error="$4"
+	lock_mutex wait || return 1
+	if ! lock_owned_by "$commit_token"; then
+		unlock_mutex
+		return 1
+	fi
+	if ! replace_managed_file "$commit_error" "$ERROR_FILE"; then
+		unlock_mutex
+		return 1
+	fi
+	if [ "$commit_ok" = true ] &&
+	   jsonfilter -i "$commit_result" -e '@' >/dev/null 2>&1; then
+		if ! replace_managed_file "$commit_result" "$RESULT_FILE" ||
+		   ! write_state complete; then
+			unlock_mutex
+			return 1
+		fi
+	else
+		rm -f "$commit_result"
+		if ! write_state failed; then
+			unlock_mutex
+			return 1
+		fi
+	fi
+	unlock_mutex
+}
+
+worker() {
+	iface="$1"
+	worker_token="$2"
+	valid_interface "$iface" || exit 2
+	claim_worker "$worker_token" || exit 3
+	result_tmp="$(mktemp "$RUNTIME_DIR/.result.XXXXXX")" || exit 1
+	error_tmp="$(mktemp "$RUNTIME_DIR/.error.XXXXXX")" || {
+		rm -f "$result_tmp"
+		exit 1
+	}
+	speedtest_pid=
+	trap 'worker_cleanup "$worker_token" "$result_tmp" "$error_tmp"' EXIT
+	trap 'terminate_worker' HUP INT TERM
+	set -- --json --secure --telemetry-level disabled
+	[ -z "$iface" ] || set -- "$@" --interface "$iface"
+
+	/usr/bin/librespeed-cli "$@" > "$result_tmp" 2> "$error_tmp" &
+	speedtest_pid=$!
+	if wait "$speedtest_pid"; then
+		test_ok=true
+	else
+		test_ok=false
+	fi
+	speedtest_pid=
+	commit_worker_result "$worker_token" "$test_ok" "$result_tmp" "$error_tmp" || exit 1
+}
+
+start_test() {
+	iface="$1"
+	valid_interface "$iface" || {
+		json_reply false invalid-interface
+		exit 2
+	}
+	lock_mutex try || {
+		json_reply false busy
+		exit 3
+	}
+	if path_exists "$LOCK_DIR"; then
+		if owner_is_active; then
+			unlock_mutex
+			json_reply false busy
+			exit 3
+		fi
+		remove_stale_run_lock || {
+			unlock_mutex
+			runtime_error
+		}
+	fi
+	create_run_lock || {
+		unlock_mutex
+		runtime_error
+	}
+	start_token="$RUN_TOKEN"
+	for file in "$RESULT_FILE" "$ERROR_FILE" "$PID_FILE"; do
+		safe_remove_file "$file" || {
+			remove_run_lock "$start_token" 2>/dev/null || true
+			unlock_mutex
+			runtime_error
+		}
+	done
+	write_state running || {
+		remove_run_lock "$start_token" 2>/dev/null || true
+		unlock_mutex
+		runtime_error
+	}
+	if start-stop-daemon -S -b -m -p "$PID_FILE" -x "$SELF" -- \
+		worker "$iface" "$start_token"; then
+		worker_pid="$(cat "$PID_FILE" 2>/dev/null)"
+		worker_start="$(process_starttime "$worker_pid")" || worker_start=
+		if [ -z "$worker_start" ] ||
+		   ! write_lock_owner worker "$worker_pid" "$worker_start" "$start_token"; then
+			remove_run_lock "$start_token" 2>/dev/null || true
+			safe_remove_file "$PID_FILE" 2>/dev/null || true
+			write_state failed 2>/dev/null || true
+			unlock_mutex
+			json_reply false failed
+			exit 1
+		fi
+		unlock_mutex
+		json_reply true running
+	else
+		write_state failed 2>/dev/null || true
+		remove_run_lock "$start_token" 2>/dev/null || true
+		safe_remove_file "$PID_FILE" 2>/dev/null || true
+		unlock_mutex
+		json_reply false failed
+		exit 1
+	fi
+}
+
+stop_test() {
+	lock_mutex wait || runtime_error
+	if path_exists "$LOCK_DIR"; then
+		if read_lock_owner; then
+			stop_token="$OWNER_TOKEN"
+			if owner_is_active; then
+				kill "$OWNER_PID" 2>/dev/null || true
+			fi
+			remove_run_lock "$stop_token" || {
+				unlock_mutex
+				runtime_error
+			}
+		else
+			remove_run_lock '' || {
+				unlock_mutex
+				runtime_error
+			}
+		fi
+	fi
+	safe_remove_file "$PID_FILE" || {
+		unlock_mutex
+		runtime_error
+	}
+	write_state cancelled || {
+		unlock_mutex
+		runtime_error
+	}
+	unlock_mutex
+	json_reply true cancelled
+}
+
+init_runtime || runtime_error
+
+case "$1" in
+	start) start_test "$2" ;;
+	stop) stop_test ;;
+	status) status ;;
+	worker) worker "$2" "$3" ;;
+	*) json_reply false invalid-action; exit 2 ;;
+esac

@@ -1,10 +1,9 @@
-name: Restore complete source history
+name: Restore complete source snapshot
 
 on:
   push:
     branches: [main]
     paths:
-      - '.bootstrap/**'
       - '.github/workflows/restore-source.yml'
 
 permissions:
@@ -18,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Verify and restore Git bundle
+      - name: Verify and publish source
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           EXPECTED_SHA256: 64e5cf49a7f8f8211ddcecb393190acb1b3d4058361efcda163a78bc2079d3cd
@@ -30,6 +29,19 @@ jobs:
           git clone --branch publish-main /tmp/source.bundle /tmp/source
           cd /tmp/source
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
-          git push --force origin refs/heads/publish-main:refs/heads/main
-          git tag -f v25.12-be14-20260901 HEAD
+          git fetch origin main
+          base_commit="$(git rev-parse origin/main)"
+          git rm -r --ignore-unmatch .github/workflows
+          mkdir -p .github/workflows
+          git show "$base_commit":.github/workflows/restore-source.yml > .github/workflows/restore-source.yml
+          git add .github/workflows/restore-source.yml
+          tree="$(git write-tree)"
+          export GIT_AUTHOR_NAME="Jason_Brom"
+          export GIT_AUTHOR_EMAIL="admin@xjysite.com"
+          export GIT_COMMITTER_NAME="$GIT_AUTHOR_NAME"
+          export GIT_COMMITTER_EMAIL="$GIT_AUTHOR_EMAIL"
+          source_commit="$(printf '%s\n\n%s\n' 'BPI-R4 BE14 MediaTek OpenWrt 25.12 source snapshot' 'Compiled and verified release v25.12-be14-20260901.' | git commit-tree "$tree" -p "$base_commit")"
+          git diff --quiet "$base_commit" "$source_commit" -- .github/workflows/restore-source.yml
+          git push origin "$source_commit":refs/heads/main
+          git tag -f v25.12-be14-20260901 "$source_commit"
           git push --force origin refs/tags/v25.12-be14-20260901:refs/tags/v25.12-be14-20260901

@@ -6,6 +6,8 @@
 
 OpenWrt 基线、feeds、内核归档和关键平台组件由下表及 `versions.env` 固定；本项目自身的补丁、配置、默认值和 `package/custom/` 则以执行构建时的**干净项目 Git HEAD** 为来源边界。这里不要求一个在首次项目提交前不可能存在的 release tag，也不虚构项目 tag/commit pin。完成首次项目提交后，该提交自然成为构建时记录的项目边界。
 
+发布的 Git bundle 可以省略 OpenWrt 基线以前的历史；构建入口沿项目第一父链验证到固定基线即停止，因此既不依赖无关的旧对象，也不会放宽对基线提交本身的校验。
+
 发布构建默认拒绝暂存、未暂存和未跟踪的项目文件。仅开发调试可显式使用 `ALLOW_DIRTY_PROJECT=1`；这不会放宽任何 feed 的 commit/clean 校验，且生成结果不能宣称为发布级可复现构建。
 
 ## Pinned repositories
@@ -54,6 +56,8 @@ hostapd 的固定提交尚未进入 `sources.openwrt.org`；表中 mirror hash �
 | `mt5700-web-go` / LuCI | `1.3.0` / `1.2.0` | 后端为本项目自包含源码；modern UI 来自 <https://github.com/inotdream/mt5700webui-openwrt-server> 的 `feat/go-backend`，commit `f0223e619d24a5b4dff41f2db894e96f8c62ed65`（2026-08-28 构建后另有本地兼容修改） |
 | `bpi-r4-be14-defaults` | `1.0.0` | 本项目自包含源码，无外部下载 |
 | `luci-app-wan-speedtest` | `1.0.0` | 本项目自包含 LuCI；运行时使用 packages feed 的 `librespeed-cli` |
+| `bandix` | `0.12.9` | <https://github.com/timsaya/openwrt-bandix>，导入点 `fc2ba97f5239d501b621c30c5ccc93a71f1ad47a`；aarch64 发布二进制 SHA-256 见 `versions.env` |
+| `luci-app-bandix` | `0.12.10` | <https://github.com/timsaya/luci-app-bandix>，导入点 `d899c02a44ba83ddf5a2384507ca3c3105e9dacc`；本项目增加 MT7988 PPE/FOE MIB 实时计数合并 |
 
 OpenClash 源码仅作为可选包保留，生产配置明确不选入；其代理核心、规则和用户订阅也不属于构建输入。原因是其高权限更新流程仍依赖不安全的固定临时路径，不满足本固件的发布安全边界。其默认下载端点还包含浮动分支、`latest` 和 `Pre-Alpha` 引用，不能视为本文固定来源的一部分。
 

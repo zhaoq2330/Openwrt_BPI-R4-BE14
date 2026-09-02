@@ -5,12 +5,18 @@
 ## 功能与默认值
 
 - MediaTek Filogic / MT7988、BE14（MT7996）固件与硬件流量卸载
-- LuCI HTTPS、简体中文、Argon；MWAN3、SQM、流量统计
+- LuCI HTTPS、简体中文、Argon；MWAN3、SQM、nlbwmon 与 Bandix 流量统计
 - QModem Next、MT5700 管理页、局域网/公网测速工具
 - LAN：`192.168.66.1/24`；主机名：`BPI-R4-BE14`
-- 硬件流量卸载默认开启，ttyd 默认关闭
+- 硬件流量卸载默认开启，Bandix 默认关闭
 
-镜像不预置 root 密码。首次启动后请只通过可信 LAN 接入，直接使用 `https://192.168.66.1/`，立即设置管理员密码（或在本地控制台执行 `passwd`），再配置 Wi-Fi 国家/地区、WPA2/WPA3 和强口令；配置完成前不要把管理面暴露到 WAN。初始 HTTPS 证书为设备自签名证书，HTTP 默认重定向到该 HTTPS 服务。MT5700 和 Speedtest-X 默认关闭；启用后会监听所有地址且默认无认证，只能放在受信 LAN/防火墙内。OpenClash 源码保留在 `package/custom` 供自行选择，但因其高权限更新流程仍使用不安全的固定临时路径，生产镜像明确不选入。硬件/软件 flow offload 可能影响 SQM、流量统计和部分 QoS；排障时先关闭 offload。
+镜像不预置 root 密码。首次启动后请只通过可信 LAN 接入，直接使用 `https://192.168.66.1/`，立即设置管理员密码（或在本地控制台执行 `passwd`），再配置 Wi-Fi 国家/地区、WPA2/WPA3 和强口令；配置完成前不要把管理面暴露到 WAN。初始 HTTPS 证书为设备自签名证书，HTTP 默认重定向到该 HTTPS 服务。MT5700 和 Speedtest-X 默认关闭；启用后会监听所有地址且默认无认证，只能放在受信 LAN/防火墙内。OpenClash 源码保留在 `package/custom` 供自行选择，但因其高权限更新流程仍使用不安全的固定临时路径，生产镜像明确不选入。
+
+Bandix 的 TC/eBPF 原生统计看不到已经进入 MT7988 PPE 的数据。本项目不为统计关闭全局硬件加速，而是在 Bandix 实时/全部视图中合并 PPE/FOE MIB 计数；历史区间仍只显示 Bandix 自身持久化的数据。采集器仅在启用 Bandix“流量监控”时运行，默认 10 秒采样一次，状态保存在 `/tmp`，不会周期写闪存。限速、SQM 或其他必须经过软件路径的功能仍可能与硬件 flow offload 冲突，应只对需要的流量旁路，避免全局关闭。
+
+为防止上游在线包覆盖本项目的 PPE 兼容层，Bandix 页面只允许检查版本，禁止直接安装未随固件校验的更新；升级请通过本仓库重新构建固件。
+
+设备上可执行 `bpi-r4-offload-health`，检查 fw4 硬件 flowtable、MT7996 WED、PPE debugfs/MIB 和近期错误日志；运行检查时持续产生 WAN 流量，MIB 增长项才会显示 PASS。
 
 ## 从 SD 安装到 SPI-NAND，再安装到 eMMC
 

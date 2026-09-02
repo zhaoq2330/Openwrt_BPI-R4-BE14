@@ -1,0 +1,88 @@
+#!/bin/sh
+# Runtime validation for the BPI-R4 MT7988 hardware-offload path.
+
+watch_seconds=3
+case "${1:-}" in
+	--quick) watch_seconds=0 ;;
+	--watch)
+		watch_seconds=${2:-3}
+		case "$watch_seconds" in ''|*[!0-9]*) watch_seconds=3 ;; esac
+		[ "$watch_seconds" -le 30 ] 2>/dev/null || watch_seconds=30
+		;;
+	-h|--help)
+		echo "usage: bpi-r4-offload-health [--quick | --watch SECONDS]"
+		exit 0
+		;;
+esac
+
+failures=0
+warnings=0
+pass() { printf 'PASS  %s\n' "$*"; }
+warn() { warnings=$((warnings + 1)); printf 'WARN  %s\n' "$*"; }
+fail() { failures=$((failures + 1)); printf 'FAIL  %s\n' "$*"; }
+
+sw_offload=$(uci -q get firewall.@defaults[0].flow_offloading)
+hw_offload=$(uci -q get firewall.@defaults[0].flow_offloading_hw)
+if [ "$sw_offload" = 1 ] && [ "$hw_offload" = 1 ]; then
+	pass "firewall software and hardware flow offloading are enabled"
+else
+	fail "firewall offload flags are not both enabled (software=${sw_offload:-unset}, hardware=${hw_offload:-unset})"
+fi
+
+flowtable=$(nft list flowtable inet fw4 ft 2>/dev/null)
+if printf '%s\n' "$flowtable" | grep -Eq 'flags[[:space:]]+offload'; then
+	pass "fw4 flowtable exists with the hardware offload flag"
+else
+	fail "inet/fw4 flowtable ft is missing or lacks 'flags offload'"
+fi
+
+wed_file=/sys/module/mt7996e/parameters/wed_enable
+if [ -r "$wed_file" ]; then
+	wed_value=$(cat "$wed_file")
+	case "$wed_value" in 1|Y|y) pass "mt7996e WED is enabled" ;; *) fail "mt7996e WED is disabled (${wed_value})" ;; esac
+else
+	fail "mt7996e WED parameter is unavailable"
+fi
+
+ppe_files=""
+for bind in /sys/kernel/debug/mtk_ppe/bind /sys/kernel/debug/ppe[0-9]*/bind; do
+	[ -r "$bind" ] || continue
+	ppe_files="$ppe_files $bind"
+done
+if [ -n "$ppe_files" ]; then
+	pass "MediaTek PPE debugfs accounting is available"
+else
+	fail "no readable MediaTek PPE bind accounting file in debugfs"
+fi
+
+ppe_sum() {
+	awk '{ for (i=1; i<=NF; i++) if ($i ~ /^bytes=[0-9]+$/) { split($i,a,"="); sum += a[2] } } END { printf "%.0f\n", sum+0 }' $ppe_files 2>/dev/null
+}
+
+if [ -n "$ppe_files" ]; then
+	bound_count=$(wc -l $ppe_files 2>/dev/null | awk 'END { print $1+0 }')
+	if [ "$bound_count" -gt 0 ] 2>/dev/null; then
+		pass "${bound_count} bound PPE/FOE entries expose MIB counters"
+		if [ "$watch_seconds" -gt 0 ]; then
+			before=$(ppe_sum)
+			sleep "$watch_seconds"
+			after=$(ppe_sum)
+			if [ "$after" -gt "$before" ] 2>/dev/null; then
+				pass "PPE MIB bytes increased during ${watch_seconds}s traffic sample"
+			else
+				warn "PPE MIB did not increase; generate WAN traffic and run the check again"
+			fi
+		fi
+	else
+		warn "no bound PPE/FOE entry; generate established WAN traffic and retry"
+	fi
+fi
+
+if dmesg 2>/dev/null | tail -n 500 | grep -Eqi '(mtk|wed|ppe|hnat).*(ser|timeout|reset|failed|fatal)'; then
+	warn "recent kernel log contains an MTK/WED/PPE reset, timeout, or failure marker"
+else
+	pass "no recent critical MTK/WED/PPE marker was found in the kernel log"
+fi
+
+printf '\nSummary: %s failure(s), %s warning(s)\n' "$failures" "$warnings"
+[ "$failures" -eq 0 ]

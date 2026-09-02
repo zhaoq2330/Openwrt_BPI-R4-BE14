@@ -69,6 +69,17 @@ check_git_checkout() {
 		die "${checkout_name} checkout is not clean: ${checkout_path}"
 }
 
+is_first_parent_ancestor() {
+	ifa_expected=$1
+	ifa_current=$2
+	while [ -n "$ifa_current" ]; do
+		[ "$ifa_current" = "$ifa_expected" ] && return 0
+		ifa_current=$(git cat-file -p "$ifa_current" 2>/dev/null | \
+			sed -n 's/^parent //p' | head -n1) || return 1
+	done
+	return 1
+}
+
 check_pinned_feed_checkouts() {
 	check_git_checkout 'packages feed' feeds/packages "$PACKAGES_FEED_COMMIT"
 	check_git_checkout 'LuCI feed' feeds/luci "$LUCI_FEED_COMMIT"
@@ -110,6 +121,7 @@ cd "$top_dir"
 require_command git
 require_command flock
 require_command grep
+require_command awk
 require_command make
 require_command mkdir
 require_command rm
@@ -141,9 +153,12 @@ git_top_dir=$(git rev-parse --show-toplevel 2>/dev/null) || die 'project is not 
 [ "$git_top_dir" = "$top_dir" ] || die "project Git root is ${git_top_dir}, expected ${top_dir}"
 git cat-file -e "${OPENWRT_COMMIT}^{commit}" 2>/dev/null || \
 	die "pinned OpenWrt commit is unavailable: ${OPENWRT_COMMIT}"
-git merge-base --is-ancestor "$OPENWRT_COMMIT" HEAD || \
+# Walk only as far as the pinned base. This also supports the documented
+# source bundle, which deliberately omits history older than that boundary.
+is_first_parent_ancestor "$OPENWRT_COMMIT" HEAD || \
 	die "current history is not based on pinned OpenWrt commit ${OPENWRT_COMMIT}"
-base_commit_epoch=$(git show -s --format=%ct "$OPENWRT_COMMIT")
+base_commit_epoch=$(git cat-file -p "$OPENWRT_COMMIT" | \
+	awk '/^committer / { print $(NF - 1); exit }')
 [ "$base_commit_epoch" = "$OPENWRT_SOURCE_DATE_EPOCH" ] || \
 	die "SOURCE_DATE_EPOCH does not match the pinned OpenWrt commit"
 
@@ -170,6 +185,11 @@ check_file_pin package/network/services/hostapd/Makefile \
 	"PKG_SOURCE_VERSION:=${HOSTAPD_COMMIT}"
 check_file_pin package/network/services/hostapd/Makefile \
 	"PKG_MIRROR_HASH:=${HOSTAPD_MIRROR_SHA256}"
+check_file_pin package/custom/bandix/Makefile "RUST_BANDIX_VERSION:=${BANDIX_VERSION}"
+check_file_pin package/custom/bandix/Makefile \
+	"PKG_HASH:=${BANDIX_BINARY_SHA256_AARCH64}"
+check_file_pin package/custom/luci-app-bandix/Makefile \
+	"PKG_VERSION:=${BANDIX_LUCI_VERSION}"
 check_file_pin rules.mk 'TAR_OPTIONS:=--no-same-owner -xf -'
 check_file_pin scripts/feeds "git clone --depth 1 --no-checkout"
 
@@ -218,6 +238,16 @@ note "Applying ${BUILD_CONFIG}"
 cp "$BUILD_CONFIG" .config
 run_make defconfig
 check_single_filogic_device
+for required_package in \
+	bandix luci-app-bandix kmod-mt7996-firmware kmod-mt7996e \
+	mt7988-wo-firmware kmod-nft-offload mtkhnat_util
+do
+	grep -qx "CONFIG_PACKAGE_${required_package}=y" .config || \
+		die "required offload/Bandix package is not selected: ${required_package}"
+done
+check_file_pin package/kernel/mt76/Makefile 'MODPARAMS.mt7996e:=wed_enable=1'
+check_file_pin package/custom/bpi-r4-be14-defaults/files/99-bpi-r4-be14-defaults \
+	"set firewall.@defaults[0].flow_offloading_hw='1'"
 
 note "Downloading sources with ${jobs} job(s)"
 run_make -j"$jobs" download V="$build_verbose"
@@ -232,6 +262,15 @@ rm -rf -- "$output_dir"
 
 note "Building ${BUILD_TARGET}/${BUILD_SUBTARGET}/${BUILD_PROFILE} with ${jobs} job(s)"
 run_make -j"$jobs" V="$build_verbose"
+
+image_manifest=$(find "$output_dir" -maxdepth 1 -type f -name "${IMAGE_PREFIX}*.manifest" | head -n1)
+[ -n "$image_manifest" ] || die 'built image package manifest is missing'
+for required_package in bandix luci-app-bandix bpi-r4-be14-defaults kmod-mt7996e mt7988-wo-firmware
+do
+	grep -Eq "^${required_package}([[:space:]]|-)" "$image_manifest" || \
+		die "built image manifest is missing package: ${required_package}"
+done
+note 'Verified Bandix, defaults, MT7996 and WED firmware in image manifest'
 
 note 'Verifying BPI-R4 artifacts'
 "$script_dir/verify-artifacts.sh" "$output_dir"

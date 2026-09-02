@@ -1,0 +1,165 @@
+#!/bin/sh
+# Incrementally account MediaTek PPE/FOE MIB bytes without removing flows from
+# hardware offload.  State is kept in /tmp to avoid periodic flash writes.
+
+set -eu
+
+interval=${BANDIX_PPE_INTERVAL:-10}
+runtime_dir=${BANDIX_PPE_RUNTIME_DIR:-/tmp/bandix-ppe}
+debug_root=${BANDIX_PPE_DEBUG_ROOT:-/sys/kernel/debug}
+ip_command=${BANDIX_PPE_IP_COMMAND:-ip}
+state_file=$runtime_dir/flow-state
+totals_file=$runtime_dir/device-totals
+sample_file=$runtime_dir/device-sample
+status_file=$runtime_dir/status
+
+case $interval in
+	''|*[!0-9]*) interval=10 ;;
+esac
+[ "$interval" -ge 5 ] 2>/dev/null || interval=5
+[ "$interval" -le 300 ] 2>/dev/null || interval=300
+
+mkdir -p "$runtime_dir"
+[ -e "$state_file" ] || : >"$state_file"
+[ -e "$totals_file" ] || : >"$totals_file"
+
+offload_enabled() {
+	[ "${BANDIX_PPE_FORCE_OFFLOAD:-0}" = 1 ] && return 0
+	[ "$(uci -q get firewall.@defaults[0].flow_offloading)" = 1 ] &&
+		[ "$(uci -q get firewall.@defaults[0].flow_offloading_hw)" = 1 ]
+}
+
+collect_once() {
+	neighbors=$runtime_dir/neighbors.new
+	bind_dump=$runtime_dir/bind.new
+	state_new=$runtime_dir/flow-state.new
+	totals_new=$runtime_dir/device-totals.new
+	sample_new=$runtime_dir/device-sample.new
+
+	: >"$neighbors"
+	# FAILED/INCOMPLETE neighbours do not identify a client reliably.
+	"$ip_command" neigh show 2>/dev/null | awk '
+		$5 ~ /^([[:xdigit:]]{2}:){5}[[:xdigit:]]{2}$/ &&
+		$0 !~ /(FAILED|INCOMPLETE)/ {
+			print tolower($5), $1
+		}' | sort -u >"$neighbors"
+
+	: >"$bind_dump"
+	available=0
+	for bind in "$debug_root"/mtk_ppe/bind "$debug_root"/ppe[0-9]*/bind; do
+		[ -r "$bind" ] || continue
+		available=1
+		cat "$bind" >>"$bind_dump"
+	done
+
+	awk -v neighbors="$neighbors" -v oldstate="$state_file" \
+		-v oldtotals="$totals_file" -v newstate="$state_new" \
+		-v newtotals="$totals_new" -v newsample="$sample_new" \
+		-v sample_interval="$interval" '
+		function endpoint_matches(endpoint, ip) {
+			return endpoint == ip || index(endpoint, ip ":") == 1
+		}
+		function add_flow(mac, ip, direction, bytes, key, delta) {
+			delta = bytes
+			if (key in previous) {
+				delta = bytes - previous[key]
+				if (delta < 0)
+					delta = bytes
+			}
+			current[key] = bytes
+			last_ip[mac] = ip
+			if (direction == "rx") {
+				total_rx[mac] += delta
+				sample_rx[mac] += delta
+			} else {
+				total_tx[mac] += delta
+				sample_tx[mac] += delta
+			}
+		}
+		FILENAME == neighbors {
+			mac_by_ip[$2] = $1
+			ip_by_mac[$1] = $2
+			next
+		}
+		FILENAME == oldstate {
+			previous[$1] = $2 + 0
+			next
+		}
+		FILENAME == oldtotals {
+			total_rx[$1] = $3 + 0
+			total_tx[$1] = $4 + 0
+			last_ip[$1] = $2
+			next
+		}
+		{
+			idx = $1
+			ppe = orig = translated = byte_text = ""
+			for (i = 1; i <= NF; i++) {
+				if ($i ~ /^ppe=/) ppe = substr($i, 5)
+				else if ($i ~ /^orig=/) orig = substr($i, 6)
+				else if ($i ~ /^new=/) translated = substr($i, 5)
+				else if ($i ~ /^bytes=/) byte_text = substr($i, 7)
+			}
+			if (ppe == "" || orig == "" || byte_text !~ /^[0-9]+$/)
+				next
+			split(orig, tuple, "->")
+			split(translated, ntuple, "->")
+			key = ppe "/" idx "/" orig "/" translated
+			for (ip in mac_by_ip) {
+				mac = mac_by_ip[ip]
+				if (endpoint_matches(tuple[1], ip)) {
+					add_flow(mac, ip, "tx", byte_text + 0, key)
+					break
+				}
+				if (endpoint_matches(tuple[2], ip) || endpoint_matches(ntuple[2], ip)) {
+					add_flow(mac, ip, "rx", byte_text + 0, key)
+					break
+				}
+				if (endpoint_matches(ntuple[1], ip)) {
+					add_flow(mac, ip, "tx", byte_text + 0, key)
+					break
+				}
+			}
+		}
+		END {
+			for (key in current)
+				print key, sprintf("%.0f", current[key]) > newstate
+			for (mac in last_ip) {
+				rx = total_rx[mac] + 0
+				tx = total_tx[mac] + 0
+				print mac, last_ip[mac], sprintf("%.0f", rx), sprintf("%.0f", tx) > newtotals
+				print mac, last_ip[mac], sprintf("%.0f", sample_rx[mac] + 0), \
+					sprintf("%.0f", sample_tx[mac] + 0), \
+					sprintf("%.0f", (sample_rx[mac] + 0) / sample_interval), \
+					sprintf("%.0f", (sample_tx[mac] + 0) / sample_interval) > newsample
+			}
+		}
+	' "$neighbors" "$state_file" "$totals_file" "$bind_dump"
+
+	[ -e "$state_new" ] || : >"$state_new"
+	[ -e "$totals_new" ] || : >"$totals_new"
+	[ -e "$sample_new" ] || : >"$sample_new"
+	mv "$state_new" "$state_file"
+	mv "$totals_new" "$totals_file"
+	mv "$sample_new" "$sample_file"
+	printf 'active=1\navailable=%s\nsampled_at=%s\ninterval=%s\n' \
+		"$available" "$(date +%s)" "$interval" >"$status_file.new"
+	mv "$status_file.new" "$status_file"
+}
+
+run_once=0
+[ "${1:-}" = --once ] && run_once=1
+
+while :; do
+	if offload_enabled; then
+		collect_once
+	else
+		printf 'active=0\navailable=0\nsampled_at=%s\ninterval=%s\n' \
+			"$(date +%s)" "$interval" >"$status_file.new"
+		mv "$status_file.new" "$status_file"
+		: >"$state_file"
+		: >"$sample_file"
+	fi
+	[ "$run_once" = 1 ] && exit 0
+	sleep "$interval"
+done

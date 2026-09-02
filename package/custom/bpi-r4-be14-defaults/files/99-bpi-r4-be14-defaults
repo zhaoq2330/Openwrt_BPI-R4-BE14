@@ -8,13 +8,11 @@ set luci.main.mediaurlbase='/luci-static/argon'
 set firewall.@defaults[0].flow_offloading='1'
 set firewall.@defaults[0].flow_offloading_hw='1'
 set uhttpd.main.redirect_https='1'
-set ttyd.@ttyd[0].enable='0'
 commit network
 commit system
 commit luci
 commit firewall
 commit uhttpd
-commit ttyd
 EOF
 
 exit 0
